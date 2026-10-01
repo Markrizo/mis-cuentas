@@ -37,7 +37,8 @@ const P = {
   check: 'M5 12l5 5 9-10',
   arrow: 'M5 12h14M13 6l6 6-6 6',
   trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3',
-  paste: 'M9 4h6v3H9zM7 5H5v16h14V5h-2'
+  paste: 'M9 4h6v3H9zM7 5H5v16h14V5h-2',
+  refresh: 'M20 11a8 8 0 0 0-14.9-4M4 4v4h4M4 13a8 8 0 0 0 14.9 4M20 20v-4h-4'
 };
 
 // ---------- Utilidades ----------
@@ -62,6 +63,21 @@ function parseAmount(str) {
   const v = parseFloat(s);
   return isNaN(v) ? 0 : round2(Math.abs(v));
 }
+// Participaciones/acciones: admite muchos decimales (1,234567).
+function parseUnits(str) {
+  const s = String(str == null ? '' : str).replace(/\s/g, '').replace(/\./g, (m, i, all) => (all.includes(',') ? '' : '.')).replace(',', '.');
+  const v = parseFloat(s);
+  return isNaN(v) || v <= 0 ? 0 : v;
+}
+const fmtUnits = (n) => (n > 0 ? String(Math.round(n * 1e6) / 1e6).replace('.', ',') : '');
+function agoLabel(iso) {
+  if (!iso) return '';
+  const d = new Date(iso), mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return 'ahora mismo';
+  if (mins < 60) return `hace ${mins} min`;
+  if (mins < 60 * 24 && d.getDate() === new Date().getDate()) return `hoy a las ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getDate()} ${MONTHS_SHORT[d.getMonth()]} a las ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 const pad = (n) => String(n).padStart(2, '0');
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 const monthKeyOf = (iso) => iso.slice(0, 7);
@@ -83,7 +99,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 
 // ---------- Datos ----------
 function emptyData() {
-  return { version: 1, months: {}, fixed: [], rules: {}, positions: [], pending: [], invSubtract: false, payday: 1, payNext: false, starts: {} };
+  return { version: 1, months: {}, fixed: [], rules: {}, positions: [], pending: [], invSubtract: false, payday: 1, payNext: false, starts: {}, priceUrl: '' };
 }
 let data = load();
 function load() {
@@ -188,7 +204,7 @@ function sortedMovs(key) {
 }
 
 // ---------- Estado de la interfaz ----------
-const ui = { tab: 'inicio', sheet: null, form: {}, histKey: null, toast: '' };
+const ui = { tab: 'inicio', sheet: null, form: {}, histKey: null, toast: '', updating: false };
 let toastTimer = null;
 function toast(msg) {
   ui.toast = msg;
@@ -386,13 +402,15 @@ function viewInversiones() {
   const t = totals(curKey());
   let h = `<main class="screen">
   <header class="head"><h1 class="title">Inversiones</h1>
-    <div style="display:flex;gap:8px"><button class="pill-btn" data-act="add" data-type="inversion" style="background:var(--blue-bg);color:var(--blue)">Aportar</button>
+    <div style="display:flex;gap:8px"><button class="icon-btn" data-act="prices" aria-label="Actualizar precios" ${ui.updating ? 'disabled' : ''} style="background:var(--blue-bg);color:var(--blue)${ui.updating ? ';opacity:.5' : ''}">${icon(P.refresh, 20, 2.2)}</button>
+    <button class="pill-btn" data-act="add" data-type="inversion" style="background:var(--blue-bg);color:var(--blue)">Aportar</button>
     <button class="icon-btn" data-act="pos-new" aria-label="Nueva posición" style="background:var(--blue-bg);color:var(--blue)">${icon(P.plus, 20, 2.2)}</button></div></header>
   <section class="card">
     <div style="display:flex;flex-direction:column;gap:6px">
       <span class="muted" style="font-size:15px;font-weight:500">Valor de la cartera</span>
       <span class="hero-amount" style="font-size:42px">${fmt(val)}</span>
       <span style="font-size:14px" class="muted"><span class="${signCls(gain)}" style="font-weight:600">${signTxt(gain)} € (${signTxt(gpct)} %)</span> · aportado ${fmt(apo)}</span>
+      ${ui.updating ? '<span class="xs muted">Buscando precios…</span>' : data.pricesAt ? `<span class="xs muted">Precios actualizados ${agoLabel(data.pricesAt)}</span>` : ''}
     </div>`;
   if (val > 0) {
     h += `<div style="display:flex;flex-direction:column;gap:8px">
@@ -415,7 +433,7 @@ function viewInversiones() {
     <ul class="list">${ps.map((p) => {
       const g = p.valor - p.aportado, gp = p.aportado > 0 ? (g / p.aportado) * 100 : 0;
       return `<li><button class="mov" data-act="pos" data-id="${p.id}">
-        <span class="txt"><span class="t">${esc(p.name)}</span><span class="s">${esc(p.note || 'Aportado ' + fmt(p.aportado))}</span></span>
+        <span class="txt"><span class="t">${esc(p.name)}</span><span class="s">${esc(p.note || 'Aportado ' + fmt(p.aportado))}${p.ticker ? ' · ' + esc(p.ticker) + (p.price > 0 ? ' ' + fmtNum(p.price) + ' €' : '') : ''}</span></span>
         <span class="a2"><span class="a">${fmt(p.valor)}</span><span class="xs ${signCls(g)}">${signTxt(g)} € · ${signTxt(gp)} %</span></span></button></li>`;
     }).join('')}</ul>`;
   });
@@ -434,6 +452,7 @@ function viewAjustes() {
     <li><button class="setrow" data-act="cobro"><span>Gastos fijos</span><span class="chev">${data.fixed.length} · ${fmt(data.fixed.filter((f) => f.on).reduce((s, f) => s + f.amount, 0))}${icon(P.chev, 16, 2)}</span></button></li>
     <li><label class="setrow"><span>Día de cobro</span><span class="chev"><select data-act="payday" aria-label="Día de cobro" style="background:none;border:0;color:var(--text2);font:inherit;font-size:16px;text-align:right;-webkit-appearance:none;appearance:none">${Array.from({ length: 31 }, (_, i) => `<option value="${i + 1}" ${payDay() === i + 1 ? 'selected' : ''}>${i === 0 ? 'Día 1 (mes natural)' : 'Día ' + (i + 1)}</option>`).join('')}</select>${icon(P.chev, 16, 2)}</span></label></li>
     ${payDay() > 1 ? `<li><label class="setrow"><span>Llamar al periodo por el mes siguiente<br><span class="xs muted">Ahora: ${monthName(curKey())} = ${periodRange(curKey())}</span></span><input class="sw" type="checkbox" role="switch" data-act="paynext" ${data.payNext ? 'checked' : ''}></label></li>` : ''}
+    <li><button class="setrow" data-act="price-url"><span>Servicio de precios</span><span class="chev">${data.priceUrl ? 'Configurado' : 'Sin configurar'}${icon(P.chev, 16, 2)}</span></button></li>
     <li><button class="setrow" data-act="help-ap"><span>Detectar pagos con Apple Pay</span><span class="chev">Configurar${icon(P.chev, 16, 2)}</span></button></li>
   </ul>`;
   if (rules.length) {
@@ -448,7 +467,7 @@ function viewAjustes() {
     <li><label class="setrow" style="cursor:pointer"><span>Importar copia</span><span class="chev">${icon(P.chev, 16, 2)}</span><input type="file" accept="application/json,.json" data-act="import" class="hide"></label></li>
     <li><button class="setrow danger" data-act="wipe"><span>Borrar todos los datos</span></button></li>
   </ul>
-  <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v3</p>
+  <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v4</p>
   </main>`;
   return h;
 }
@@ -606,6 +625,11 @@ function sheetPos(f) {
     <label class="field"><span>Total aportado</span><input data-field="aportado" value="${esc(f.aportado)}" placeholder="0,00 €" inputmode="decimal" autocomplete="off"></label>
     <label class="field"><span>Valor actual</span><input data-field="valor" value="${esc(f.valor)}" placeholder="0,00 €" inputmode="decimal" autocomplete="off"></label>
   </div>
+  <div class="form">
+    <label class="field"><span>Ticker o ISIN</span><input data-field="ticker" value="${esc(f.ticker)}" placeholder="Ej. AAPL, IE00B42W3S00" autocapitalize="characters" autocomplete="off" spellcheck="false"></label>
+    <label class="field"><span>Participaciones</span><input data-field="units" value="${esc(f.units)}" placeholder="Opcional" inputmode="decimal" autocomplete="off"></label>
+  </div>
+  <p class="xs muted" style="line-height:1.4;margin-top:-6px">Con ticker o ISIN, el botón de actualizar busca el precio. Si no pones participaciones, se calculan con el valor actual. Déjalo vacío para lo que no tiene precio público, como la Cartera Indie.</p>
   <datalist id="plats">${[...new Set(data.positions.map((p) => p.platform))].map((p) => `<option value="${esc(p)}">`).join('')}</datalist>
   <button class="primary" data-act="save-pos">Guardar</button>
   ${f.id ? `<button class="secondary danger" data-act="pos-del">Eliminar posición</button>` : ''}
@@ -698,6 +722,32 @@ async function pastePayment() {
   openAP();
   try { await navigator.clipboard.writeText(''); } catch (e) { /* no pasa nada */ }
 }
+async function updatePrices() {
+  if (ui.updating) return;
+  if (!data.priceUrl) { toast('Primero configura el servicio de precios en Ajustes'); return; }
+  const list = data.positions.filter((p) => p.ticker);
+  if (!list.length) { toast('Añade el ticker o ISIN a tus posiciones'); return; }
+  ui.updating = true; render();
+  const fails = [];
+  await Promise.all(list.map(async (p) => {
+    try {
+      const ctrl = new AbortController(); const tm = setTimeout(() => ctrl.abort(), 15000);
+      const r = await fetch(data.priceUrl.replace(/\/+$/, '') + '/?q=' + encodeURIComponent(p.ticker), { signal: ctrl.signal, cache: 'no-store' });
+      clearTimeout(tm);
+      const j = await r.json();
+      if (!r.ok || !(j.priceEUR > 0)) throw new Error(j.error || 'sin precio');
+      if (!(p.units > 0)) p.units = p.valor > 0 ? p.valor / j.priceEUR : 0;
+      p.price = j.priceEUR; p.priceAt = new Date().toISOString(); p.symbol = j.symbol;
+      if (p.units > 0) p.valor = round2(p.units * j.priceEUR);
+    } catch (e) { fails.push(p.name); }
+  }));
+  ui.updating = false;
+  if (fails.length < list.length) data.pricesAt = new Date().toISOString();
+  save(); render();
+  if (!fails.length) toast(`Precios actualizados (${list.length})`);
+  else if (fails.length === list.length) toast('No se pudieron obtener los precios. Revisa la conexión o el servicio.');
+  else toast('Sin precio para: ' + fails.join(', '));
+}
 function addMov(mov) {
   const key = periodKeyOf(mov.date);
   ensureMonth(key).movs.push(Object.assign({ id: uid(), created: String(Date.now()) }, mov));
@@ -727,7 +777,7 @@ function handleAction(el, ev) {
         toast('Gasto añadido: ' + fmt(-v));
       } else if (f.type === 'inversion') {
         const pos = data.positions.find((p) => p.id === f.pos);
-        if (pos) { pos.aportado = round2(pos.aportado + v); pos.valor = round2(pos.valor + v); }
+        if (pos) { pos.aportado = round2(pos.aportado + v); pos.valor = round2(pos.valor + v); if (pos.units > 0 && pos.price > 0) pos.units += v / pos.price; }
         addMov({ kind: 'inv', title: f.concept.trim() || (pos ? pos.name : 'Inversión'), via: pos ? pos.platform : 'Aportación', date, amount: v, pos: pos ? pos.id : null });
         toast('Inversión añadida: ' + fmt(v));
       } else {
@@ -803,24 +853,30 @@ function handleAction(el, ev) {
       if (x) {
         if (x.kind === 'inv' && x.pos) {
           const pos = data.positions.find((p) => p.id === x.pos);
-          if (pos) { pos.aportado = round2(pos.aportado - x.amount); pos.valor = round2(pos.valor - x.amount); }
+          if (pos) { pos.aportado = round2(pos.aportado - x.amount); pos.valor = round2(pos.valor - x.amount); if (pos.units > 0 && pos.price > 0) pos.units = Math.max(0, pos.units - x.amount / pos.price); }
         }
         m.movs = m.movs.filter((y) => y.id !== f.id);
         save();
       }
       ui.sheet = null; render(); toast('Movimiento eliminado'); break;
     }
-    case 'pos-new': openSheet('pos', { name: '', platform: '', note: '', aportado: '', valor: '' }); break;
+    case 'pos-new': openSheet('pos', { name: '', platform: '', note: '', aportado: '', valor: '', ticker: '', units: '' }); break;
     case 'pos': {
       const p = data.positions.find((x) => x.id === el.dataset.id);
-      if (p) openSheet('pos', { id: p.id, name: p.name, platform: p.platform, note: p.note || '', aportado: fmtNum(p.aportado), valor: fmtNum(p.valor) });
+      if (p) openSheet('pos', { id: p.id, name: p.name, platform: p.platform, note: p.note || '', aportado: fmtNum(p.aportado), valor: fmtNum(p.valor), ticker: p.ticker || '', units: fmtUnits(p.units) });
       break;
     }
     case 'save-pos': {
       const name = (f.name || '').trim();
       if (!name) { toast('Ponle un nombre'); return; }
       const rec = { name, platform: (f.platform || '').trim() || 'Sin plataforma', note: (f.note || '').trim(), aportado: parseAmount(f.aportado), valor: f.valor === '' ? parseAmount(f.aportado) : parseAmount(f.valor) };
-      if (f.id) Object.assign(data.positions.find((x) => x.id === f.id), rec);
+      const old = f.id ? data.positions.find((x) => x.id === f.id) : null;
+      rec.ticker = (f.ticker || '').trim().toUpperCase().replace(/\s/g, '');
+      const sameTicker = old && old.ticker === rec.ticker;
+      rec.price = sameTicker ? old.price || 0 : 0;
+      rec.units = parseUnits(f.units) || (rec.price > 0 && rec.valor > 0 ? rec.valor / rec.price : 0);
+      if (!rec.ticker) { rec.price = 0; rec.units = 0; }
+      if (old) Object.assign(old, rec);
       else data.positions.push(Object.assign({ id: uid() }, rec));
       save(); ui.sheet = null; render(); toast('Posición guardada'); break;
     }
@@ -828,6 +884,15 @@ function handleAction(el, ev) {
       data.positions = data.positions.filter((x) => x.id !== f.id);
       save(); ui.sheet = null; render(); toast('Posición eliminada'); break;
     case 'help-ap': openSheet('help-ap'); break;
+    case 'prices': updatePrices(); break;
+    case 'price-url': {
+      const v = prompt('Pega la dirección de tu servicio de precios (termina en .workers.dev):', data.priceUrl || 'https://');
+      if (v === null) break;
+      const url = v.trim();
+      if (url && !/^https:\/\/[^\s]+$/.test(url)) { toast('Tiene que empezar por https://'); break; }
+      data.priceUrl = url; save(); render(); toast(url ? 'Servicio de precios guardado' : 'Servicio de precios quitado');
+      break;
+    }
     case 'rule-del': delete data.rules[el.dataset.rule]; save(); render(); break;
     case 'export': exportData(); break;
     case 'wipe':

@@ -1,6 +1,6 @@
 // Service worker: guarda la app para que abra sin conexión.
 // Sube VERSION cada vez que cambies archivos para que el iPhone descargue la nueva versión.
-const VERSION = 'mis-cuentas-v3';
+const VERSION = 'mis-cuentas-v4';
 const FILES = [
   './',
   'index.html',
