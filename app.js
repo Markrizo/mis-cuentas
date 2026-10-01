@@ -83,7 +83,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 
 // ---------- Datos ----------
 function emptyData() {
-  return { version: 1, months: {}, fixed: [], rules: {}, positions: [], pending: [], invSubtract: false };
+  return { version: 1, months: {}, fixed: [], rules: {}, positions: [], pending: [], invSubtract: false, payday: 1, payNext: false, starts: {} };
 }
 let data = load();
 function load() {
@@ -110,7 +110,63 @@ function ensureMonth(key) {
   }
   return data.months[key];
 }
-const curKey = () => monthKeyOf(todayISO());
+// ---------- Día de cobro ----------
+// El "mes" de la app va desde el día de cobro hasta el día anterior al siguiente cobro.
+// Si el día no existe en un mes (p. ej. 31 en abril), se usa el último día de ese mes.
+const daysIn = (y, m0) => new Date(y, m0 + 1, 0).getDate();
+const payDay = () => { const d = parseInt(data.payday, 10); return d >= 1 && d <= 31 ? d : 1; };
+const labelNext = () => !!data.payNext && payDay() > 1;
+const startDayOf = (key) => Math.min(payDay(), daysIn(parseInt(key.slice(0, 4), 10), parseInt(key.slice(5, 7), 10) - 1));
+// Cada periodo puede tener su propia fecha de inicio (data.starts[clave] = 'AAAA-MM-DD').
+// Si no la tiene, se calcula con el día de cobro. El final es siempre el día antes del inicio del siguiente.
+const isoOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const addDays = (iso, n) => { const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + n); return isoOf(d); };
+const shortD = (iso) => parseInt(iso.slice(8, 10), 10) + ' ' + MONTHS_SHORT[parseInt(iso.slice(5, 7), 10) - 1];
+function defaultStart(key) {
+  const k = labelNext() ? shiftMonth(key, -1) : key;
+  return `${k}-${pad(startDayOf(k))}`;
+}
+function startISO(key) {
+  const st = data.starts && data.starts[key];
+  return /^\d{4}-\d{2}-\d{2}$/.test(st || '') ? st : defaultStart(key);
+}
+const endISO = (key) => addDays(startISO(shiftMonth(key, 1)), -1);
+function periodKeyOf(iso) {
+  let key = iso.slice(0, 7);
+  if (parseInt(iso.slice(8, 10), 10) < startDayOf(key)) key = shiftMonth(key, -1);
+  if (labelNext()) key = shiftMonth(key, 1);
+  for (let i = 0; i < 4 && iso < startISO(key); i++) key = shiftMonth(key, -1);
+  for (let i = 0; i < 4 && iso >= startISO(shiftMonth(key, 1)); i++) key = shiftMonth(key, 1);
+  return key;
+}
+function periodRange(key) {
+  const st = startISO(key), en = endISO(key);
+  const natural = st === key + '-01' && en.slice(0, 7) === key && addDays(en, 1).slice(8, 10) === '01';
+  return natural ? '' : `${shortD(st)} – ${shortD(en)}`;
+}
+// Guarda inicio y fin de un periodo (el fin mueve el inicio del siguiente). Devuelve un error o ''.
+function setPeriod(key, st, en) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(st) || !/^\d{4}-\d{2}-\d{2}$/.test(en)) return 'Elige las dos fechas';
+  const prevSt = startISO(shiftMonth(key, -1)), next = shiftMonth(key, 1), next2St = startISO(shiftMonth(key, 2));
+  if (st <= prevSt) return 'El inicio tiene que ser después del ' + shortD(prevSt);
+  if (en < st) return 'El final no puede ser antes del inicio';
+  if (addDays(en, 1) >= next2St) return 'El final tiene que ser antes del ' + shortD(next2St);
+  if (!data.starts) data.starts = {};
+  const put = (k, v) => { if (v === defaultStart(k)) delete data.starts[k]; else data.starts[k] = v; };
+  put(key, st); put(next, addDays(en, 1));
+  return '';
+}
+// Recoloca todos los movimientos en su periodo según su fecha (al cambiar el día de cobro).
+function rebucket() {
+  const all = [];
+  Object.keys(data.months).forEach((k) => { all.push(...data.months[k].movs); data.months[k].movs = []; });
+  all.forEach((x) => ensureMonth(periodKeyOf(x.date)).movs.push(x));
+  Object.keys(data.months).forEach((k) => {
+    const m = data.months[k];
+    if (!m.movs.length && m.cobro == null && k !== curKey()) delete data.months[k];
+  });
+}
+const curKey = () => periodKeyOf(todayISO());
 function totals(key) {
   const m = data.months[key] || { cobro: 0, fixed: [], movs: [] };
   let fixed = 0, variable = 0, invested = 0, extra = 0;
@@ -202,7 +258,7 @@ function viewInicio() {
   const p = data.pending[0];
   let h = `<main class="screen">
   <header class="head">
-    <div><div class="eyebrow">${monthLabel(key)}</div><h1 class="title">Resumen</h1></div>
+    <div><div class="eyebrow">${monthLabel(key)}${periodRange(key) ? ' · ' + periodRange(key) : ''}</div><h1 class="title">Resumen</h1></div>
     <button class="pill-btn" data-act="paste">${icon(P.wallet, 16)}Pegar pago</button>
   </header>`;
   if (m.cobro == null) {
@@ -294,6 +350,7 @@ function viewMes(key) {
   let h = `<main class="screen">
   <button class="link" data-act="hist-back" style="align-self:flex-start;font-size:17px;gap:2px">${icon(P.back, 22, 2.2)}Historial</button>
   <h1 class="title">${monthLabel(key)}</h1>
+  ${periodRange(key) ? `<p class="small muted" style="margin-top:-8px">Del ${periodRange(key).replace(' – ', ' al ')}</p>` : ''}
   <section class="card">
     <div class="grid2">
       <div class="stat"><span class="k">Cobrado</span><span class="v">${m.cobro == null ? '—' : fmt(t.income)}</span></div>
@@ -375,6 +432,8 @@ function viewAjustes() {
   <ul class="list">
     <li><button class="setrow" data-act="cobro"><span>Cobro de ${monthName(key)}</span><span class="chev">${m.cobro == null ? 'Sin indicar' : fmt(m.cobro)}${icon(P.chev, 16, 2)}</span></button></li>
     <li><button class="setrow" data-act="cobro"><span>Gastos fijos</span><span class="chev">${data.fixed.length} · ${fmt(data.fixed.filter((f) => f.on).reduce((s, f) => s + f.amount, 0))}${icon(P.chev, 16, 2)}</span></button></li>
+    <li><label class="setrow"><span>Día de cobro</span><span class="chev"><select data-act="payday" aria-label="Día de cobro" style="background:none;border:0;color:var(--text2);font:inherit;font-size:16px;text-align:right;-webkit-appearance:none;appearance:none">${Array.from({ length: 31 }, (_, i) => `<option value="${i + 1}" ${payDay() === i + 1 ? 'selected' : ''}>${i === 0 ? 'Día 1 (mes natural)' : 'Día ' + (i + 1)}</option>`).join('')}</select>${icon(P.chev, 16, 2)}</span></label></li>
+    ${payDay() > 1 ? `<li><label class="setrow"><span>Llamar al periodo por el mes siguiente<br><span class="xs muted">Ahora: ${monthName(curKey())} = ${periodRange(curKey())}</span></span><input class="sw" type="checkbox" role="switch" data-act="paynext" ${data.payNext ? 'checked' : ''}></label></li>` : ''}
     <li><button class="setrow" data-act="help-ap"><span>Detectar pagos con Apple Pay</span><span class="chev">Configurar${icon(P.chev, 16, 2)}</span></button></li>
   </ul>`;
   if (rules.length) {
@@ -389,7 +448,7 @@ function viewAjustes() {
     <li><label class="setrow" style="cursor:pointer"><span>Importar copia</span><span class="chev">${icon(P.chev, 16, 2)}</span><input type="file" accept="application/json,.json" data-act="import" class="hide"></label></li>
     <li><button class="setrow danger" data-act="wipe"><span>Borrar todos los datos</span></button></li>
   </ul>
-  <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v1</p>
+  <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v3</p>
   </main>`;
   return h;
 }
@@ -493,6 +552,12 @@ function sheetCobro(f) {
     <div class="amount-row" style="justify-content:flex-start"><input id="f-cobro" class="amount-in" style="text-align:left;width:210px;font-size:40px;color:var(--green)" inputmode="decimal" placeholder="0,00" autocomplete="off" data-field="cobro" value="${esc(f.cobro)}"><span class="euro green" style="font-size:32px">€</span></div>
     ${m.suggested && !f.cobro ? `<button class="chip" data-act="cobro-suggest" style="align-self:flex-start;background:var(--green-bg);color:#86EFAC;font-weight:600">Igual que el mes pasado (${fmt(m.suggested)})</button>` : ''}
   </div>
+  <div><h2 class="h2">Periodo</h2><p class="small muted">Los gastos con fecha dentro de este periodo cuentan para ${monthName(f.month)}. Cambiar el final mueve el inicio del mes siguiente.</p></div>
+  <div class="form">
+    <label class="field"><span>Empieza</span><input type="date" data-field="pStart" value="${esc(f.pStart)}"></label>
+    <label class="field"><span>Termina</span><input type="date" data-field="pEnd" value="${esc(f.pEnd)}"></label>
+  </div>
+  ${data.starts && (data.starts[f.month] || data.starts[shiftMonth(f.month, 1)]) ? `<button class="link" data-act="period-reset" style="align-self:flex-start;font-size:15px">Volver a usar el día de cobro</button>` : ''}
   <div><h2 class="h2">Gastos fijos</h2><p class="small muted">Se descuentan solos cada mes. ${isCur ? 'Los cambios valen también para los meses siguientes.' : 'Solo cambian este mes.'}</p></div>
   ${m.fixed.length ? `<ul class="list">${m.fixed.map((x) => `<li class="setrow">
       <label style="display:flex;align-items:center;gap:12px;flex-grow:1;min-width:0;cursor:pointer"><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.label)}</span><span style="color:#D4D4D8">${fmt(x.amount)}</span><input class="sw" type="checkbox" role="switch" data-act="fixed-toggle" data-id="${x.id}" ${x.on ? 'checked' : ''} aria-label="Incluir ${esc(x.label)}"></label>
@@ -555,9 +620,9 @@ function sheetHelpAP() {
   <ol class="steps">
     <li>Abre <b>Atajos</b> → pestaña <b>Automatización</b> → <b>+</b> → <b>Transacción</b>.</li>
     <li>Elige tus tarjetas, marca <b>Ejecutar inmediatamente</b> y pulsa <b>Siguiente</b> → <b>Nueva automatización en blanco</b>.</li>
-    <li>Añade la acción <b>Texto</b> y escribe:<br><span class="code">ApplePay|</span> + variable <b>Comercio</b> + <span class="code">|</span> + variable <b>Importe</b><br><span class="xs muted">Queda así: ApplePay|Comercio|Importe</span></li>
+    <li>Añade la acción <b>Texto</b>. Escribe <span class="code">ApplePay|</span>, pulsa <b>Entrada del atajo</b> en la barra de variables, tócala y elige <b>Comercio</b>. Escribe <span class="code">|</span> y repite eligiendo <b>Importe</b>.<br><span class="xs muted">Comercio e Importe deben verse como fichas de color, no escritos a mano.</span></li>
     <li>Añade <b>Copiar al portapapeles</b>.</li>
-    <li>Añade <b>Mostrar notificación</b> con el texto «Pago copiado: abre Mis Cuentas».</li>
+    <li>Añade <b>Mostrar notificación</b> y pon como texto la variable <b>Texto</b> del paso 3. Así ves en el aviso lo que se ha copiado.</li>
     <li>Después de pagar, abre la app y pulsa <b>Pegar pago</b> arriba a la derecha. La primera vez iOS te pedirá permiso para pegar.</li>
   </ol>
   <p class="small muted" style="line-height:1.4">También puedes pegar texto como «Mercadona 43,27» copiado de cualquier sitio.</p>
@@ -619,7 +684,11 @@ async function pastePayment() {
     return;
   }
   const p = parseClipboard(text);
-  if (!p) { toast('No hay ningún pago copiado'); return; }
+  if (!p) {
+    const seen = String(text || '').trim();
+    toast(seen ? 'No entiendo lo copiado: «' + (seen.length > 40 ? seen.slice(0, 40) + '…' : seen) + '»' : 'El portapapeles está vacío: el atajo no se ha ejecutado');
+    return;
+  }
   const d = new Date();
   p.when = `Hoy, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   p.id = uid();
@@ -630,7 +699,7 @@ async function pastePayment() {
   try { await navigator.clipboard.writeText(''); } catch (e) { /* no pasa nada */ }
 }
 function addMov(mov) {
-  const key = monthKeyOf(mov.date);
+  const key = periodKeyOf(mov.date);
   ensureMonth(key).movs.push(Object.assign({ id: uid(), created: String(Date.now()) }, mov));
   save();
 }
@@ -688,7 +757,7 @@ function handleAction(el, ev) {
     case 'cobro': {
       const key = el.dataset.month || curKey();
       const m = ensureMonth(key);
-      openSheet('cobro', { month: key, cobro: m.cobro == null ? '' : fmtNum(m.cobro), fxLabel: '', fxAmount: '' });
+      openSheet('cobro', { month: key, cobro: m.cobro == null ? '' : fmtNum(m.cobro), fxLabel: '', fxAmount: '', pStart: startISO(key), pEnd: endISO(key) });
       break;
     }
     case 'cobro-suggest': {
@@ -710,9 +779,20 @@ function handleAction(el, ev) {
       save(); renderSheet(); break;
     }
     case 'save-cobro': {
+      if (f.pStart !== startISO(f.month) || f.pEnd !== endISO(f.month)) {
+        const err = setPeriod(f.month, f.pStart, f.pEnd);
+        if (err) { toast(err); return; }
+        rebucket();
+      }
       const m = ensureMonth(f.month);
       m.cobro = f.cobro === '' ? null : parseAmount(f.cobro);
       save(); ui.sheet = null; render(); toast('Guardado'); break;
+    }
+    case 'period-reset': {
+      delete data.starts[f.month]; delete data.starts[shiftMonth(f.month, 1)];
+      rebucket(); save();
+      f.pStart = startISO(f.month); f.pEnd = endISO(f.month);
+      renderSheet(); toast('Periodo según el día de cobro'); break;
     }
     case 'hist-month': ui.tab = 'historial'; ui.histKey = el.dataset.month; render(); break;
     case 'hist-back': ui.histKey = null; render(); break;
@@ -790,7 +870,7 @@ function importData(file) {
 app.addEventListener('click', (ev) => {
   const el = ev.target.closest('[data-act]');
   if (!el || !app.contains(el)) return;
-  if (el.tagName === 'INPUT') return; // los inputs se gestionan en 'change'
+  if (el.tagName === 'INPUT' || el.tagName === 'SELECT') return; // se gestionan en 'change'
   handleAction(el, ev);
 });
 app.addEventListener('input', (ev) => {
@@ -821,7 +901,14 @@ app.addEventListener('change', (ev) => {
   const el = ev.target;
   const act = el.dataset.act;
   if (el.dataset.field === 'remember') { ui.form.remember = el.checked; return; }
+  if (el.dataset.field && ui.sheet && el.type === 'date') { ui.form[el.dataset.field] = el.value; return; }
   if (act === 'inv-subtract') { data.invSubtract = el.checked; save(); return; }
+  if (act === 'payday') {
+    data.payday = parseInt(el.value, 10) || 1; rebucket(); save(); render();
+    toast(payDay() === 1 ? 'Mes natural' : 'Cobro el día ' + payDay() + ': ' + periodRange(curKey()));
+    return;
+  }
+  if (act === 'paynext') { data.payNext = el.checked; rebucket(); save(); render(); return; }
   if (act === 'fixed-toggle') {
     const m = ensureMonth(ui.form.month);
     const x = m.fixed.find((y) => y.id === el.dataset.id);

@@ -1,15 +1,15 @@
 // Service worker: guarda la app para que abra sin conexión.
 // Sube VERSION cada vez que cambies archivos para que el iPhone descargue la nueva versión.
-const VERSION = 'mis-cuentas-v1';
+const VERSION = 'mis-cuentas-v3';
 const FILES = [
   './',
   'index.html',
   'styles.css',
   'app.js',
   'manifest.webmanifest',
-  'icons/icon-180.png',
-  'icons/icon-192.png',
-  'icons/icon-512.png'
+  'icon-180.png',
+  'icon-192.png',
+  'icon-512.png'
 ];
 
 self.addEventListener('install', (e) => {
