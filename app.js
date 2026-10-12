@@ -21,6 +21,8 @@ const CATS = {
   otros: { label: 'Otros', long: 'Otros', path: 'M5 12h.01M12 12h.01M19 12h.01' }
 };
 const CAT_ORDER = Object.keys(CATS);
+const IS_ANDROID = /android/i.test(navigator.userAgent);
+const WALLET = IS_ANDROID ? 'Google Wallet' : 'Apple Pay';
 const INC_TYPES = ['Nómina', 'Paga extra', 'Reembolso', 'Otro'];
 const P = {
   inv: 'M3 17l6-6 4 4 8-8M15 7h6v6',
@@ -203,8 +205,29 @@ function sortedMovs(key) {
   return m.movs.slice().sort((a, b) => (b.date + b.created).localeCompare(a.date + a.created));
 }
 
+// ---------- Contraseña de acceso ----------
+// Se guarda solo un resumen (hash SHA-256 con sal), nunca la contraseña. Va aparte de los datos,
+// así que no viaja en las copias exportadas. Es una pantalla de bloqueo: no cifra los datos.
+const LOCK_KEY = 'misCuentas.lock';
+const LOCK_AFTER_MS = 60 * 1000;
+function getLock() {
+  try { const l = JSON.parse(localStorage.getItem(LOCK_KEY) || 'null'); return l && l.hash && l.salt ? l : null; } catch (e) { return null; }
+}
+async function hashPin(pin, salt) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(salt + '|' + pin));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+async function setLock(pin) {
+  const salt = Array.from(crypto.getRandomValues(new Uint8Array(16))).map((b) => b.toString(16).padStart(2, '0')).join('');
+  localStorage.setItem(LOCK_KEY, JSON.stringify({ salt, hash: await hashPin(pin, salt) }));
+}
+async function checkPin(pin) {
+  const l = getLock();
+  return !!l && (await hashPin(pin, l.salt)) === l.hash;
+}
+
 // ---------- Estado de la interfaz ----------
-const ui = { tab: 'inicio', sheet: null, form: {}, histKey: null, toast: '', updating: false };
+const ui = { tab: 'inicio', sheet: null, form: {}, histKey: null, toast: '', updating: false, locked: !!getLock(), lockErr: '', forgot: false };
 let toastTimer = null;
 function toast(msg) {
   ui.toast = msg;
@@ -215,7 +238,37 @@ function toast(msg) {
 
 // ---------- Render ----------
 const app = document.getElementById('app');
+function lockScreen() {
+  return `<main class="screen" style="justify-content:center;align-items:stretch;padding-bottom:calc(var(--safe-bottom) + 40px)">
+  <div style="display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center">
+    <span style="width:64px;height:64px;border-radius:20px;background:var(--green-bg);color:var(--green);display:flex;align-items:center;justify-content:center">${icon('M6 11h12v10H6zM8 11V7a4 4 0 0 1 8 0v4', 30, 2)}</span>
+    <h1 class="title" style="font-size:26px">Mis Cuentas</h1>
+    <p class="muted small">${ui.forgot ? 'Sin la contraseña solo se puede entrar borrando todos los datos de este móvil.' : 'Introduce tu contraseña'}</p>
+  </div>
+  ${ui.forgot ? `
+  <div class="form"><label class="field"><span>Escribe BORRAR</span><input id="wipe-confirm" autocomplete="off" autocapitalize="characters"></label></div>
+  <button class="primary" data-act="lock-wipe" style="background:var(--red);color:#2A0606">Borrar datos y quitar contraseña</button>
+  <button class="secondary" data-act="lock-back">Volver</button>` : `
+  <div class="form"><label class="field"><span>Contraseña</span><input id="lock-pin" type="password" autocomplete="current-password" enterkeyhint="go" autofocus></label></div>
+  ${ui.lockErr ? `<p class="small red" style="text-align:center">${esc(ui.lockErr)}</p>` : ''}
+  <button class="primary" data-act="unlock">Entrar</button>
+  <button class="secondary" data-act="lock-forgot" style="font-size:14px;color:var(--text2)">¿Has olvidado la contraseña?</button>`}
+  </main><div id="sheet-root"></div><div id="toast-root"></div>`;
+}
+async function tryUnlock() {
+  const i = document.getElementById('lock-pin');
+  const pin = i ? i.value : '';
+  if (!pin) return;
+  if (await checkPin(pin)) {
+    ui.locked = false; ui.lockErr = ''; render();
+    if (data.pending.length && ui.tab === 'inicio') openAP();
+  } else {
+    ui.lockErr = 'Contraseña incorrecta'; render();
+    const n = document.getElementById('lock-pin'); if (n) n.focus();
+  }
+}
 function render() {
+  if (ui.locked) { app.innerHTML = lockScreen(); renderToast(); return; }
   ensureMonth(curKey());
   let html = '';
   if (ui.tab === 'inicio') html += viewInicio();
@@ -302,7 +355,7 @@ function viewInicio() {
   if (p) {
     h += `<button class="alert" data-act="ap">
       <span class="ic">${icon(P.wallet, 22)}</span>
-      <span class="txt"><span class="t">${data.pending.length > 1 ? data.pending.length + ' pagos por revisar' : 'Pago con Apple Pay'}</span><span class="small muted">${esc(p.m)} · ${fmt(p.a)}</span></span>
+      <span class="txt"><span class="t">${data.pending.length > 1 ? data.pending.length + ' pagos por revisar' : 'Pago con ' + WALLET}</span><span class="small muted">${esc(p.m)} · ${fmt(p.a)}</span></span>
       <span class="badge">Revisar</span></button>`;
   }
   h += `<div class="row-between" style="margin-top:4px"><h2 class="h2">Últimos movimientos</h2><button class="link" data-act="hist-month" data-month="${key}">Ver todo</button></div>`;
@@ -433,7 +486,7 @@ function viewInversiones() {
     <ul class="list">${ps.map((p) => {
       const g = p.valor - p.aportado, gp = p.aportado > 0 ? (g / p.aportado) * 100 : 0;
       return `<li><button class="mov" data-act="pos" data-id="${p.id}">
-        <span class="txt"><span class="t">${esc(p.name)}</span><span class="s">${esc(p.note || 'Aportado ' + fmt(p.aportado))}${p.ticker ? ' · ' + esc(p.ticker) + (p.price > 0 ? ' ' + fmtNum(p.price) + ' €' : '') : ''}</span></span>
+        <span class="txt"><span class="t">${esc(p.name)}</span><span class="s">${esc(p.note || 'Aportado ' + fmt(p.aportado))}${p.ticker ? ' · ' + esc(p.ticker) + (p.price > 0 ? ' ' + fmtNum(p.price) + ' €' : '') : ''}${p.manualAt ? ' · valor a mano ' + shortD(p.manualAt.slice(0, 10)) : p.priceTime ? ' · precio del ' + shortD(isoOf(new Date(p.priceTime))) : ''}</span></span>
         <span class="a2"><span class="a">${fmt(p.valor)}</span><span class="xs ${signCls(g)}">${signTxt(g)} € · ${signTxt(gp)} %</span></span></button></li>`;
     }).join('')}</ul>`;
   });
@@ -453,7 +506,8 @@ function viewAjustes() {
     <li><label class="setrow"><span>Día de cobro</span><span class="chev"><select data-act="payday" aria-label="Día de cobro" style="background:none;border:0;color:var(--text2);font:inherit;font-size:16px;text-align:right;-webkit-appearance:none;appearance:none">${Array.from({ length: 31 }, (_, i) => `<option value="${i + 1}" ${payDay() === i + 1 ? 'selected' : ''}>${i === 0 ? 'Día 1 (mes natural)' : 'Día ' + (i + 1)}</option>`).join('')}</select>${icon(P.chev, 16, 2)}</span></label></li>
     ${payDay() > 1 ? `<li><label class="setrow"><span>Llamar al periodo por el mes siguiente<br><span class="xs muted">Ahora: ${monthName(curKey())} = ${periodRange(curKey())}</span></span><input class="sw" type="checkbox" role="switch" data-act="paynext" ${data.payNext ? 'checked' : ''}></label></li>` : ''}
     <li><button class="setrow" data-act="price-url"><span>Servicio de precios</span><span class="chev">${data.priceUrl ? 'Configurado' : 'Sin configurar'}${icon(P.chev, 16, 2)}</span></button></li>
-    <li><button class="setrow" data-act="help-ap"><span>Detectar pagos con Apple Pay</span><span class="chev">Configurar${icon(P.chev, 16, 2)}</span></button></li>
+    <li><button class="setrow" data-act="lock-set"><span>Contraseña de acceso</span><span class="chev">${getLock() ? 'Activada' : 'Desactivada'}${icon(P.chev, 16, 2)}</span></button></li>
+    <li><button class="setrow" data-act="help-ap"><span>Detectar pagos con ${WALLET}</span><span class="chev">Configurar${icon(P.chev, 16, 2)}</span></button></li>
   </ul>`;
   if (rules.length) {
     h += `<h2 class="h2" style="margin-top:4px">Categorías recordadas</h2><ul class="list">` +
@@ -464,16 +518,17 @@ function viewAjustes() {
   <p class="small muted" style="line-height:1.4">Tus datos solo están en este iPhone. Exporta una copia de vez en cuando y guárdala en Archivos o iCloud Drive.</p>
   <ul class="list">
     <li><button class="setrow" data-act="export"><span>Exportar copia</span><span class="chev">${icon(P.chev, 16, 2)}</span></button></li>
-    <li><label class="setrow" style="cursor:pointer"><span>Importar copia</span><span class="chev">${icon(P.chev, 16, 2)}</span><input type="file" accept="application/json,.json" data-act="import" class="hide"></label></li>
+    <li><label class="setrow" style="cursor:pointer"><span>Importar copia</span><span class="chev">${icon(P.chev, 16, 2)}</span><input type="file" data-act="import" class="hide"></label></li>
     <li><button class="setrow danger" data-act="wipe"><span>Borrar todos los datos</span></button></li>
   </ul>
-  <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v4</p>
+  <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v6</p>
   </main>`;
   return h;
 }
 
 // ---------- Hojas (sheets) ----------
 function openSheet(name, form) {
+  if (!ui.sheet) { try { history.pushState({ sheet: 1 }, ''); } catch (e) { /* sin historial */ } }
   ui.sheet = name;
   ui.form = form || {};
   renderSheet();
@@ -483,7 +538,9 @@ function closeSheet() {
   ui.form = {};
   renderSheet();
 }
+let ignorePop = false;
 function renderSheet() {
+  if (!ui.sheet && history.state && history.state.sheet) { ignorePop = true; history.back(); }
   const root = document.getElementById('sheet-root');
   if (!root) return;
   const f = ui.form;
@@ -494,6 +551,7 @@ function renderSheet() {
   else if (ui.sheet === 'mov') inner = sheetMov(f);
   else if (ui.sheet === 'pos') inner = sheetPos(f);
   else if (ui.sheet === 'help-ap') inner = sheetHelpAP();
+  else if (ui.sheet === 'lock') inner = sheetLock(f);
   root.innerHTML = inner;
 }
 
@@ -542,9 +600,9 @@ function sheetAP(f) {
   const t = totals(curKey());
   const cats = ['super', 'comida', 'gasolina', 'compras', 'hogar', 'perro', 'ocio', 'transporte', 'salud', 'otros'];
   return `<div class="backdrop" data-act="close"></div>
-  <div class="sheet" role="dialog" aria-modal="true" aria-label="Pago con Apple Pay">
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Pago con ${WALLET}">
   <div class="grabber"></div>
-  <div class="row-between" style="align-items:center"><span class="chip" style="display:flex;align-items:center;gap:6px;min-height:30px;font-size:13px;font-weight:600">${icon(P.wallet, 16)}Apple Pay</span><span class="small muted">${esc(p.when || '')}</span></div>
+  <div class="row-between" style="align-items:center"><span class="chip" style="display:flex;align-items:center;gap:6px;min-height:30px;font-size:13px;font-weight:600">${icon(P.wallet, 16)}${WALLET}</span><span class="small muted">${esc(p.when || '')}</span></div>
   <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
     <span style="font-size:17px;font-weight:600;color:#D4D4D8">${esc(p.m)}</span>
     <span class="hero-amount" style="font-size:52px">${fmt(p.a)}</span></div>
@@ -629,14 +687,32 @@ function sheetPos(f) {
     <label class="field"><span>Ticker o ISIN</span><input data-field="ticker" value="${esc(f.ticker)}" placeholder="Ej. AAPL, IE00B42W3S00" autocapitalize="characters" autocomplete="off" spellcheck="false"></label>
     <label class="field"><span>Participaciones</span><input data-field="units" value="${esc(f.units)}" placeholder="Opcional" inputmode="decimal" autocomplete="off"></label>
   </div>
-  <p class="xs muted" style="line-height:1.4;margin-top:-6px">Con ticker o ISIN, el botón de actualizar busca el precio. Si no pones participaciones, se calculan con el valor actual. Déjalo vacío para lo que no tiene precio público, como la Cartera Indie.</p>
+  <p class="xs muted" style="line-height:1.4;margin-top:-6px">Pon las <b>participaciones</b> exactas que te muestra tu banco o bróker: el valor se calcula como participaciones × precio. Los fondos publican su precio con 1-2 días de retraso; si cambias el valor actual a mano, se respeta hasta que llegue un precio más nuevo. Con ticker o ISIN, el botón de actualizar busca el precio. Si no pones participaciones, se calculan con el valor actual. Déjalo vacío para lo que no tiene precio público, como la Cartera Indie.</p>
   <datalist id="plats">${[...new Set(data.positions.map((p) => p.platform))].map((p) => `<option value="${esc(p)}">`).join('')}</datalist>
   <button class="primary" data-act="save-pos">Guardar</button>
   ${f.id ? `<button class="secondary danger" data-act="pos-del">Eliminar posición</button>` : ''}
   </div>`;
 }
 
+function sheetLock(f) {
+  const has = !!getLock();
+  return `<div class="backdrop" data-act="close"></div>
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Contraseña de acceso">
+  <div class="grabber"></div>
+  <h2 class="h2">${has ? 'Cambiar contraseña' : 'Poner contraseña'}</h2>
+  <p class="small muted" style="line-height:1.4">La app te la pedirá al abrirla y al volver a ella tras un minuto fuera. Si la olvidas, solo podrás entrar borrando los datos, así que exporta una copia antes.</p>
+  <div class="form">
+    ${has ? `<label class="field"><span>Actual</span><input type="password" data-field="cur" autocomplete="current-password"></label>` : ''}
+    <label class="field"><span>Nueva</span><input type="password" data-field="pin1" autocomplete="new-password" placeholder="Mínimo 4 caracteres"></label>
+    <label class="field"><span>Repetir</span><input type="password" data-field="pin2" autocomplete="new-password"></label>
+  </div>
+  <button class="primary" data-act="lock-save">Guardar contraseña</button>
+  ${has ? `<button class="secondary danger" data-act="lock-remove">Quitar contraseña</button>` : ''}
+  </div>`;
+}
+
 function sheetHelpAP() {
+  if (IS_ANDROID) return sheetHelpAndroid();
   return `<div class="sheet full" role="dialog" aria-modal="true" aria-label="Configurar Apple Pay">
   <div class="sheet-head"><button class="link" data-act="close" style="font-size:17px;gap:2px">${icon(P.back, 22, 2.2)}Volver</button><span></span></div>
   <h1 class="title" style="font-size:28px">Detectar pagos con Apple Pay</h1>
@@ -650,6 +726,27 @@ function sheetHelpAP() {
     <li>Después de pagar, abre la app y pulsa <b>Pegar pago</b> arriba a la derecha. La primera vez iOS te pedirá permiso para pegar.</li>
   </ol>
   <p class="small muted" style="line-height:1.4">También puedes pegar texto como «Mercadona 43,27» copiado de cualquier sitio.</p>
+  <button class="primary" data-act="close">Entendido</button>
+  </div>`;
+}
+
+function appURL() { return location.origin + location.pathname; }
+function sheetHelpAndroid() {
+  const link = appURL() + '?pago=1&comercio=TITULO&texto=TEXTO';
+  return `<div class="sheet full" role="dialog" aria-modal="true" aria-label="Configurar Google Wallet">
+  <div class="sheet-head"><button class="link" data-act="close" style="font-size:17px;gap:2px">${icon(P.back, 22, 2.2)}Volver</button><span></span></div>
+  <h1 class="title" style="font-size:28px">Detectar pagos con Google Wallet</h1>
+  <p class="muted" style="line-height:1.45">Con la app gratuita <b>MacroDroid</b>, cada vez que pagues con el móvil llegará la notificación del pago y Mis Cuentas se abrirá sola con el gasto listo para confirmar.</p>
+  <ol class="steps">
+    <li>Instala Mis Cuentas desde Chrome: menú <b>⋮</b> → <b>Instalar aplicación</b> (o <b>Añadir a pantalla de inicio</b>).</li>
+    <li>Instala <b>MacroDroid</b> desde Google Play y dale el permiso de <b>acceso a notificaciones</b>.</li>
+    <li><b>Añadir macro</b> → Disparador: <b>Aplicaciones → Notificación recibida</b> → elige <b>Google Wallet</b> (si quien avisa del pago es la app de tu banco, elige esa) → contenido: <b>Cualquiera</b>.</li>
+    <li>Acción: <b>Aplicaciones → Abrir sitio web</b> y pega este enlace:<br><span class="code" style="word-break:break-all;display:inline-block;margin-top:6px">${esc(link)}</span><br>
+      <button class="chip" data-act="copy-link" style="margin-top:8px;background:var(--green-bg);color:#86EFAC;font-weight:600">Copiar enlace</button></li>
+    <li>En el enlace, sustituye <span class="code">TITULO</span> por el <b>título de la notificación</b> y <span class="code">TEXTO</span> por el <b>texto de la notificación</b>, usando el botón de <b>texto mágico</b> de MacroDroid (no los escribas a mano).</li>
+    <li>Guarda la macro. Al pagar, se abrirá Mis Cuentas con el pago: elige categoría y pulsa <b>Añadir gasto</b>.</li>
+  </ol>
+  <p class="small muted" style="line-height:1.4">Si prefieres no usar MacroDroid, copia el texto de la notificación y pulsa <b>Pegar pago</b> en Inicio.</p>
   <button class="primary" data-act="close">Entendido</button>
   </div>`;
 }
@@ -680,24 +777,68 @@ function guessCat(m) {
   for (const [cat, words] of table) if (words.some((w) => s.includes(w))) return cat;
   return 'otros';
 }
+// Busca el importe en un texto: primero cifras junto al símbolo €, luego cualquier cifra con decimales.
+function findAmount(text, strict) {
+  const tx = String(text || '').replace(/[•*·]+\s*\d+/g, ' '); // quita "••1234" de la tarjeta
+  const pats = [
+    /(\d{1,3}(?:[.\s\u00a0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:€|EUR)/i,
+    /(?:€|EUR)\s*(\d{1,3}(?:[.,\s\u00a0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/i,
+    /(\d+[.,]\d{2})(?!\d)/,
+    /(\d+)/
+  ];
+  for (const re of (strict ? pats.slice(0, 3) : pats)) {
+    const m = tx.match(re);
+    if (m && parseAmount(m[1]) > 0) return { raw: m[0], num: m[1] };
+  }
+  return null;
+}
+// Pagos que llegan por enlace (Android: MacroDroid abre ?pago=1&comercio=...&texto=...).
+function handleIncomingURL() {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('pago') && !q.has('importe')) return false;
+  let amount = parseAmount(q.get('importe') || '');
+  const texto = q.get('texto') || '';
+  let merchant = (q.get('comercio') || '').trim();
+  if (/^(google\s*)?(wallet|cartera|pay)$|^google pay$/i.test(merchant)) merchant = '';
+  const titleHasEuro = /€|eur/i.test(merchant);
+  if (!(amount > 0)) {
+    const mm = (titleHasEuro && findAmount(merchant, true)) || findAmount(texto, true) || findAmount(merchant, true);
+    if (mm) amount = parseAmount(mm.num);
+  }
+  if (merchant && findAmount(merchant) && /€|eur/i.test(merchant)) {
+    // el título trae el importe ("43,27 € en Mercadona"): quédate con el resto
+    const mm = findAmount(merchant);
+    merchant = merchant.replace(mm.raw, '').replace(/^\s*(en|a|in|at)\s+/i, '').replace(/[·:|-]+/g, ' ').trim();
+  }
+  if (!merchant && texto) {
+    const m2 = texto.match(/\b(?:en|in|at)\s+([^·,.\d][^·,]*?)(?:\s+con\b|\s+with\b|[·,.]|$)/i);
+    if (m2) merchant = m2[1].trim();
+  }
+  history.replaceState(null, '', location.pathname);
+  if (!(amount > 0)) { setTimeout(() => toast('No se encontró el importe del pago'), 300); return false; }
+  const d = new Date();
+  data.pending.push({ id: uid(), m: merchant || 'Pago con ' + WALLET, a: amount, when: `Hoy, ${pad(d.getHours())}:${pad(d.getMinutes())}`, via: WALLET });
+  save();
+  return true;
+}
 function parseClipboard(text) {
   const tx = String(text || '').trim();
   if (!tx) return null;
   let merchant = '', amount = 0;
   const parts = tx.split('|').map((x) => x.trim());
-  if (parts.length >= 3 && /apple\s*pay/i.test(parts[0])) {
+  if (parts.length >= 3 && /apple\s*pay|wallet|pago/i.test(parts[0])) {
     merchant = parts[1]; amount = parseAmount(parts[2]);
   } else if (parts.length === 2) {
     merchant = parts[0]; amount = parseAmount(parts[1]);
   } else {
-    const mm = tx.match(/(-?\d{1,3}(?:[.\s]\d{3})*(?:[.,]\d{1,2})|-?\d+(?:[.,]\d{1,2})?)\s*€?/);
+    const mm = findAmount(tx);
     if (mm) {
-      amount = parseAmount(mm[1]);
-      merchant = tx.replace(mm[0], '').replace(/[|€]/g, ' ').replace(/\s+/g, ' ').trim();
+      amount = parseAmount(mm.num);
+      merchant = tx.replace(mm.raw, '').replace(/[|€]/g, ' ').replace(/\s+/g, ' ').trim();
     }
   }
   if (!(amount > 0)) return null;
-  return { m: merchant || 'Pago con Apple Pay', a: amount };
+  return { m: merchant || 'Pago con ' + WALLET, a: amount };
 }
 async function pastePayment() {
   let text = '';
@@ -738,7 +879,11 @@ async function updatePrices() {
       if (!r.ok || !(j.priceEUR > 0)) throw new Error(j.error || 'sin precio');
       if (!(p.units > 0)) p.units = p.valor > 0 ? p.valor / j.priceEUR : 0;
       p.price = j.priceEUR; p.priceAt = new Date().toISOString(); p.symbol = j.symbol;
-      if (p.units > 0) p.valor = round2(p.units * j.priceEUR);
+      p.priceTime = j.time || null;
+      // Si has puesto el valor a mano, no lo pisa un precio más antiguo que tu dato
+      // (los fondos publican su valor liquidativo con 1-2 días de retraso).
+      const manualWins = p.manualAt && (!j.time || new Date(j.time) <= new Date(p.manualAt));
+      if (p.units > 0 && !manualWins) { p.valor = round2(p.units * j.priceEUR); delete p.manualAt; }
     } catch (e) { fails.push(p.name); }
   }));
   ui.updating = false;
@@ -793,7 +938,7 @@ function handleAction(el, ev) {
       const p = data.pending.shift();
       if (p) {
         if (f.remember) data.rules[p.m.toLowerCase()] = f.cat;
-        addMov({ kind: 'gasto', cat: f.cat, title: p.m, via: 'Apple Pay', date: todayISO(), amount: p.a });
+        addMov({ kind: 'gasto', cat: f.cat, title: p.m, via: p.via || WALLET, date: todayISO(), amount: p.a });
         toast('Gasto añadido: ' + fmt(-p.a));
       }
       save(); ui.sheet = null; render();
@@ -876,6 +1021,10 @@ function handleAction(el, ev) {
       rec.price = sameTicker ? old.price || 0 : 0;
       rec.units = parseUnits(f.units) || (rec.price > 0 && rec.valor > 0 ? rec.valor / rec.price : 0);
       if (!rec.ticker) { rec.price = 0; rec.units = 0; }
+      // Valor actual cambiado a mano: se respeta hasta que llegue un precio más reciente.
+      if (old && rec.ticker && Math.abs(rec.valor - (old.valor || 0)) >= 0.005) rec.manualAt = new Date().toISOString();
+      else if (old && old.manualAt && rec.ticker) rec.manualAt = old.manualAt;
+      if (old && !rec.manualAt) delete old.manualAt;
       if (old) Object.assign(old, rec);
       else data.positions.push(Object.assign({ id: uid() }, rec));
       save(); ui.sheet = null; render(); toast('Posición guardada'); break;
@@ -884,6 +1033,33 @@ function handleAction(el, ev) {
       data.positions = data.positions.filter((x) => x.id !== f.id);
       save(); ui.sheet = null; render(); toast('Posición eliminada'); break;
     case 'help-ap': openSheet('help-ap'); break;
+    case 'lock-set': openSheet('lock', { cur: '', pin1: '', pin2: '' }); break;
+    case 'lock-save': (async () => {
+      if (getLock() && !(await checkPin(f.cur || ''))) { toast('La contraseña actual no es correcta'); return; }
+      if ((f.pin1 || '').length < 4) { toast('Usa al menos 4 caracteres'); return; }
+      if (f.pin1 !== f.pin2) { toast('Las contraseñas no coinciden'); return; }
+      try { await setLock(f.pin1); } catch (e) { toast('No se pudo guardar la contraseña'); return; }
+      ui.sheet = null; ui.form = {}; render(); toast('Contraseña guardada');
+    })(); break;
+    case 'lock-remove': (async () => {
+      if (!(await checkPin(f.cur || ''))) { toast('Escribe la contraseña actual para quitarla'); return; }
+      localStorage.removeItem(LOCK_KEY);
+      ui.sheet = null; ui.form = {}; render(); toast('Contraseña quitada');
+    })(); break;
+    case 'unlock': tryUnlock(); break;
+    case 'lock-forgot': ui.forgot = true; render(); break;
+    case 'lock-back': ui.forgot = false; render(); break;
+    case 'lock-wipe': {
+      const c = document.getElementById('wipe-confirm');
+      if (!c || c.value.trim().toUpperCase() !== 'BORRAR') { toast('Escribe BORRAR para confirmar'); return; }
+      localStorage.removeItem(LOCK_KEY);
+      data = emptyData(); save();
+      ui.locked = false; ui.forgot = false; ui.tab = 'inicio'; render(); toast('Datos borrados');
+      break;
+    }
+    case 'copy-link':
+      navigator.clipboard.writeText(appURL() + '?pago=1&comercio=TITULO&texto=TEXTO').then(() => toast('Enlace copiado'), () => toast('No se pudo copiar'));
+      break;
     case 'prices': updatePrices(); break;
     case 'price-url': {
       const v = prompt('Pega la dirección de tu servicio de precios (termina en .workers.dev):', data.priceUrl || 'https://');
@@ -918,15 +1094,23 @@ function exportData() {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 function importData(file) {
+  toast('Leyendo copia…');
   const r = new FileReader();
+  r.onerror = () => toast('No se pudo leer el archivo');
   r.onload = () => {
+    let d;
     try {
-      const d = JSON.parse(r.result);
-      if (!d || typeof d !== 'object' || !d.months) throw new Error('formato');
-      if (!confirm('¿Reemplazar los datos actuales por los de la copia?')) return;
-      data = Object.assign(emptyData(), d);
-      save(); render(); toast('Copia importada');
-    } catch (e) { toast('El archivo no es una copia válida'); }
+      d = JSON.parse(String(r.result).replace(/^\uFEFF/, ''));
+      if (!d || typeof d !== 'object' || !d.months || typeof d.months !== 'object') throw new Error('formato');
+    } catch (e) { toast('El archivo no es una copia de Mis Cuentas'); return; }
+    // Copia de seguridad de lo que había, por si acaso (sin diálogos: en Android a veces no aparecen).
+    try { localStorage.setItem(STORE_KEY + '.antes-de-importar', JSON.stringify(data)); } catch (e) { /* sin espacio */ }
+    data = Object.assign(emptyData(), d);
+    save();
+    ui.tab = 'inicio'; ui.histKey = null; ui.sheet = null;
+    render();
+    const nm = Object.keys(data.months).length, np = (data.positions || []).length;
+    toast(`Copia importada: ${nm} ${nm === 1 ? 'mes' : 'meses'}, ${np} posiciones`);
   };
   r.readAsText(file);
 }
@@ -984,15 +1168,34 @@ app.addEventListener('change', (ev) => {
   if (act === 'import' && el.files && el.files[0]) { importData(el.files[0]); el.value = ''; return; }
 });
 app.addEventListener('keydown', (ev) => {
+  if (ui.locked && ev.key === 'Enter' && ev.target.id === 'lock-pin') { ev.preventDefault(); tryUnlock(); return; }
   if (ev.key === 'Enter' && ev.target.tagName === 'INPUT' && ui.sheet === 'add') {
     const btn = app.querySelector('[data-act="save-add"]');
     if (btn && !btn.disabled) { ev.target.blur(); handleAction(btn, ev); }
   }
 });
-// Al volver a la app, si ha cambiado el mes, se crea el nuevo automáticamente.
-document.addEventListener('visibilitychange', () => { if (!document.hidden && !ui.sheet) render(); });
+// Solo si de verdad ha cambiado el mes: redibujar al volver del selector de archivos de Android
+// destruía el campo "Importar copia" antes de que llegara el archivo elegido.
+let renderedMonth = curKey();
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (getLock() && !ui.locked && hiddenAt && Date.now() - hiddenAt > LOCK_AFTER_MS) {
+    ui.locked = true; ui.sheet = null; ui.form = {}; render(); return;
+  }
+  if (ui.sheet) return;
+  if (curKey() !== renderedMonth) { renderedMonth = curKey(); render(); }
+});
 
+// Botón "atrás" de Android: cierra la hoja abierta en vez de salir de la app.
+window.addEventListener('popstate', () => {
+  if (ignorePop) { ignorePop = false; return; }
+  if (ui.sheet) { ui.sheet = null; ui.form = {}; renderSheet(); }
+});
+
+const incoming = handleIncomingURL();
 render();
+if (incoming && !ui.locked) openAP();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
